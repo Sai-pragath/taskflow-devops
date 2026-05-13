@@ -1,0 +1,106 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  BACKEND_IMAGE: ghcr.io/${{ github.repository }}/backend
+  FRONTEND_IMAGE: ghcr.io/${{ github.repository }}/frontend
+
+jobs:
+  # ── Build & Test Backend ──
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: task-management-system/backend
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build backend
+        run: mvn clean package -DskipTests -B
+
+      - name: Run tests
+        run: mvn test -B
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-jar
+          path: task-management-system/backend/target/*.jar
+
+  # ── Build Frontend ──
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: task-management-system/frontend
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: npm
+          cache-dependency-path: task-management-system/frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+  # ── Docker Build & Push ──
+  docker:
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push backend image
+        run: |
+          docker build -t ${{ env.BACKEND_IMAGE }}:latest -t ${{ env.BACKEND_IMAGE }}:${{ github.sha }} ./task-management-system/backend
+          docker push ${{ env.BACKEND_IMAGE }}:latest
+          docker push ${{ env.BACKEND_IMAGE }}:${{ github.sha }}
+
+      - name: Build and push frontend image
+        run: |
+          docker build -t ${{ env.FRONTEND_IMAGE }}:latest -t ${{ env.FRONTEND_IMAGE }}:${{ github.sha }} ./task-management-system/frontend
+          docker push ${{ env.FRONTEND_IMAGE }}:latest
+          docker push ${{ env.FRONTEND_IMAGE }}:${{ github.sha }}
+
+  # ── Deploy ──
+  deploy:
+    needs: docker
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Deploy to Render
+        run: |
+          curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}" || echo "Deploy hook not configured"
